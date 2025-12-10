@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import hashlib
 from config import Config
 from utils.file_utils import allowed_file
 import tempfile
@@ -16,11 +17,16 @@ if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
 # Initialize session state for BERTopic
-if 'bertopic_built' not in st.session_state:
-    st.session_state.bertopic_built = False
+if 'bertopic_cache' not in st.session_state:
+    st.session_state.bertopic_cache = {}  # Dictionary to cache models per file hash
 
-if 'bertopic_data' not in st.session_state:
-    st.session_state.bertopic_data = None
+def get_file_hash(file_path):
+    """Calculate SHA256 hash of file content to identify unique files."""
+    hash_sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_sha256.update(chunk)
+    return hash_sha256.hexdigest()
 
 def main():
     st.title("📊 TikTok Comments Analyzer")
@@ -59,9 +65,7 @@ def upload_page():
             tmp_file.write(uploaded_file.getvalue())
             st.session_state.uploaded_file = tmp_file.name
 
-        # Reset BERTopic session state for new file
-        st.session_state.bertopic_built = False
-        st.session_state.bertopic_data = None
+
 
         st.success("File berhasil diupload!")
         st.info("Sedang memuat halaman Home...")
@@ -80,7 +84,9 @@ def home_page():
             with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
                 tmp_file.write(new_file.getvalue())
                 st.session_state.uploaded_file = tmp_file.name
+
             st.success("File berhasil diganti!")
+            st.info("Model BERTopic akan dimuat ulang untuk file baru.")
     else:
         st.warning("Silakan upload file CSV terlebih dahulu melalui menu Upload.")
 
@@ -402,21 +408,24 @@ def bertopic_page():
         return
 
     try:
-        # Check if model is already built in session
-        if st.session_state.bertopic_built and st.session_state.bertopic_data is not None:
-            data = st.session_state.bertopic_data
-            st.info("Menggunakan model BERTopic yang sudah dibangun sebelumnya.")
-        elif os.path.exists('models/bertopic_model.pkl'):
-            data = get_bertopic_analysis()
-            st.session_state.bertopic_data = data
-            st.session_state.bertopic_built = True
-            st.info("Model BERTopic dimuat dari file.")
+        # Calculate file hash to identify unique files
+        file_hash = get_file_hash(st.session_state.uploaded_file)
+
+        # Check if model is already cached for this file
+        if file_hash in st.session_state.bertopic_cache:
+            data = st.session_state.bertopic_cache[file_hash]
+            st.success("Model BERTopic dimuat dari cache! Tidak perlu membangun ulang.")
         else:
-            with st.spinner("Membangun model BERTopic... Ini mungkin memakan waktu beberapa menit."):
-                data = build_bertopic_model(st.session_state.uploaded_file)
-            st.session_state.bertopic_data = data
-            st.session_state.bertopic_built = True
-            st.success("Model BERTopic berhasil dibangun dan disimpan!")
+            # Try to load existing model for this specific file
+            data = get_bertopic_analysis(st.session_state.uploaded_file)
+            if 'error' not in data:
+                st.session_state.bertopic_cache[file_hash] = data
+                st.info("Model BERTopic dimuat dari file dan disimpan ke cache.")
+            else:
+                with st.spinner("Membangun model BERTopic... Ini mungkin memakan waktu beberapa menit."):
+                    data = build_bertopic_model(st.session_state.uploaded_file)
+                st.session_state.bertopic_cache[file_hash] = data
+                st.success("Model BERTopic berhasil dibangun dan disimpan ke cache!")
 
         # Display results
         if 'error' in data:
@@ -439,7 +448,6 @@ def bertopic_page():
                         "topic_id": st.column_config.NumberColumn("ID Topik"),
                         "keywords": st.column_config.ListColumn("Kata Kunci"),
                         "count": st.column_config.NumberColumn("Jumlah Komentar"),
-                        "probability": st.column_config.NumberColumn("Probabilitas", format="%.3f"),
                         "name": st.column_config.TextColumn("Nama Topik")
                     },
                     hide_index=True,
